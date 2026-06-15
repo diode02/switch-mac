@@ -2,6 +2,14 @@
 
 A macOS menu bar app to share a Magic Keyboard between multiple Macs — no physical button press needed.
 
+## Tested on
+
+| Hardware | Details |
+|---|---|
+| MacBook Air (Apple Silicon) | M-series chip |
+| MacBook Pro (Apple Silicon) | M-series chip |
+| Magic Keyboard with Touch ID | Lightning connector |
+
 ## How it works
 
 SwitchMac runs on each Mac independently. Moving the keyboard is a two-step process:
