@@ -60,19 +60,26 @@ class BluetoothManager {
     /// After this the keyboard is free for another Mac to claim.
     func unpair(_ address: String) {
         log("Unpairing \(address)…")
-        // Disconnect first, then unpair
-        run("--disconnect", address)
-        Thread.sleep(forTimeInterval: 1.0)
-        run("--unpair", address)
+        // Run in background to avoid blocking UI if blueutil hangs
+        DispatchQueue.global(qos: .utility).async {
+            // Disconnect first, then unpair
+            _ = self.run("--disconnect", address)
+            Thread.sleep(forTimeInterval: 1.0)
+            _ = self.run("--unpair", address)
+        }
     }
 
     /// Connects to the keyboard. Keyboard must still be paired with this Mac.
     func connect(_ address: String) {
         log("Connecting to \(address)…")
-        let result = run("--connect", address)
-        if result != 0 {
-            // Fallback: IOBluetooth
-            IOBluetoothDevice(addressString: address)?.openConnection()
+        DispatchQueue.global(qos: .utility).async {
+            let result = self.run("--connect", address)
+            if result != 0 {
+                // Fallback: IOBluetooth
+                if let dev = IOBluetoothDevice(addressString: address) {
+                    dev.openConnection()
+                }
+            }
         }
     }
 
@@ -84,6 +91,8 @@ class BluetoothManager {
         blueutilPaths.first { FileManager.default.fileExists(atPath: $0) }
     }
 
+    private let blueutilTimeout: TimeInterval = 10.0
+
     @discardableResult
     private func run(_ args: String...) -> Int32 {
         guard let path = blueutilPath() else {
@@ -93,8 +102,22 @@ class BluetoothManager {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: path)
         proc.arguments = args
-        try? proc.run()
-        proc.waitUntilExit()
+        let sem = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in sem.signal() }
+        do {
+            try proc.run()
+        } catch {
+            log("Failed to run blueutil: \(error)")
+            return -1
+        }
+        let waitResult = sem.wait(timeout: .now() + blueutilTimeout)
+        if waitResult == .timedOut {
+            log("blueutil \(args.joined(separator: " ")) timed out after \(blueutilTimeout)s — terminating")
+            proc.terminate()
+            // Give it a short moment to exit cleanly
+            _ = sem.wait(timeout: .now() + 2.0)
+            return -2
+        }
         log("blueutil \(args.joined(separator: " ")) → \(proc.terminationStatus)")
         return proc.terminationStatus
     }
@@ -107,9 +130,23 @@ class BluetoothManager {
         proc.arguments = args
         proc.standardOutput = pipe
         proc.standardError = Pipe()
-        try? proc.run()
-        proc.waitUntilExit()
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+        let sem = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in sem.signal() }
+        do {
+            try proc.run()
+        } catch {
+            log("Failed to run blueutil: \(error)")
+            return nil
+        }
+        let waitResult = sem.wait(timeout: .now() + blueutilTimeout)
+        if waitResult == .timedOut {
+            log("blueutil \(args.joined(separator: " ")) timed out after \(blueutilTimeout)s — terminating")
+            proc.terminate()
+            _ = sem.wait(timeout: .now() + 2.0)
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: Parsing
