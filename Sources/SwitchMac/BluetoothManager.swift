@@ -93,8 +93,52 @@ class BluetoothManager {
 
     private let blueutilTimeout: TimeInterval = 10.0
 
+    /// Path to the helper executable (if built or bundled alongside the app).
+    private func helperPath() -> String? {
+        // Look next to the running executable (app bundle or debug build)
+        if let exe = Bundle.main.executableURL {
+            let candidate = exe.deletingLastPathComponent().appendingPathComponent("SwitchMacBTHelper").path
+            if FileManager.default.fileExists(atPath: candidate) { return candidate }
+        }
+        // Common build output when running via `swift run`/`swift build`
+        let debugCandidate = FileManager.default.currentDirectoryPath + "/.build/debug/SwitchMacBTHelper"
+        if FileManager.default.fileExists(atPath: debugCandidate) { return debugCandidate }
+        // Installed location (optional)
+        let local = "/usr/local/bin/SwitchMacBTHelper"
+        if FileManager.default.fileExists(atPath: local) { return local }
+        return nil
+    }
+
     @discardableResult
     private func run(_ args: String...) -> Int32 {
+        // Prefer helper executable when available — it isolates blueutil in a separate process.
+        if let helper = helperPath() {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: helper)
+            proc.arguments = args
+            let sem = DispatchSemaphore(value: 0)
+            proc.terminationHandler = { _ in sem.signal() }
+            do {
+                try proc.run()
+            } catch {
+                log("Failed to run helper: \(error)")
+                return -1
+            }
+            let waitResult = sem.wait(timeout: .now() + blueutilTimeout)
+            if waitResult == .timedOut {
+                log("helper \(args.joined(separator: " ")) timed out after \(blueutilTimeout)s — terminating")
+                proc.terminate()
+                _ = sem.wait(timeout: .now() + 2.0)
+                return -2
+            }
+            let status = proc.terminationStatus
+            // Map helper's special timeout code (253) to local -2
+            if status == 253 { return -2 }
+            log("helper \(args.joined(separator: " ")) → \(status)")
+            return status
+        }
+
+        // Fallback: run blueutil directly with an enforced timeout
         guard let path = blueutilPath() else {
             log("blueutil not found — brew install blueutil")
             return -1
@@ -123,6 +167,34 @@ class BluetoothManager {
     }
 
     private func runBlueutil(args: [String]) -> String? {
+        // Prefer helper executable when available — captures output and isolates hangs
+        if let helper = helperPath() {
+            let proc = Process()
+            let pipe = Pipe()
+            proc.executableURL = URL(fileURLWithPath: helper)
+            proc.arguments = args
+            proc.standardOutput = pipe
+            proc.standardError = Pipe()
+            let sem = DispatchSemaphore(value: 0)
+            proc.terminationHandler = { _ in sem.signal() }
+            do {
+                try proc.run()
+            } catch {
+                log("Failed to run helper: \(error)")
+                return nil
+            }
+            let waitResult = sem.wait(timeout: .now() + blueutilTimeout)
+            if waitResult == .timedOut {
+                log("helper \(args.joined(separator: " ")) timed out after \(blueutilTimeout)s — terminating")
+                proc.terminate()
+                _ = sem.wait(timeout: .now() + 2.0)
+                return nil
+            }
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            return String(data: data, encoding: .utf8)
+        }
+
+        // Fallback: run blueutil directly
         guard let path = blueutilPath() else { return nil }
         let proc = Process()
         let pipe = Pipe()
