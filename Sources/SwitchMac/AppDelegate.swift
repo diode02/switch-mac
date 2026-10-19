@@ -42,10 +42,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let isPaired   = bluetooth.isKeyboardPaired(address)
         let isConnected = bluetooth.isKeyboardConnected(address)
+        let isBusy = bluetooth.isBusy
 
         // ── Status header ──
         let statusText: String
-        if isConnected      { statusText = "⌨  Keyboard connected to this Mac" }
+        if isBusy           { statusText = "⌛  Connecting…" }
+        else if isConnected { statusText = "⌨  Keyboard connected to this Mac" }
         else if isPaired    { statusText = "○  Keyboard paired (not connected)" }
         else                { statusText = "✗  Keyboard not paired with this Mac" }
         let statusItem2 = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
@@ -61,18 +63,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             keyEquivalent: "r"
         )
         releaseItem.target = self
-        releaseItem.isEnabled = isPaired
+        releaseItem.isEnabled = isPaired && !isBusy
         menu.addItem(releaseItem)
 
         // ── Step 2: Connect ──
         let connectItem = NSMenuItem(
-            title: "2️⃣  Connect keyboard to this Mac",
+            title: isBusy ? "2️⃣  Connecting…" : "2️⃣  Connect keyboard to this Mac",
             action: #selector(connectKeyboard),
             keyEquivalent: "c"
         )
         connectItem.target = self
-        connectItem.isEnabled = !isConnected
+        connectItem.isEnabled = !isConnected && !isBusy
         menu.addItem(connectItem)
+
+        // When busy, add a cancel item so user can stop the in-progress operation
+        if isBusy {
+            let cancelItem = NSMenuItem(title: "Cancel connection…", action: #selector(cancelConnection), keyEquivalent: "")
+            cancelItem.target = self
+            menu.addItem(cancelItem)
+        }
 
         menu.addItem(.separator())
 
@@ -105,7 +114,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc private func connectKeyboard() {
         guard let address = bluetooth.keyboardAddress else { return }
         bluetooth.connect(address)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { self.rebuildMenu() }
+        // Immediately refresh menu so user sees the connecting state
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.rebuildMenu() }
+    }
+
+    @objc private func cancelConnection() {
+        bluetooth.cancelCurrentOperation()
+        // Refresh menu shortly after cancelling to reflect new state
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.rebuildMenu() }
     }
 
     // MARK: Keyboard picker

@@ -17,9 +17,26 @@ class BluetoothManager {
 
     private let defaultsKey = "switchmac.keyboardAddress"
 
+    // A reference to any currently-running helper/blueutil Process so it can be cancelled.
+    private var currentProcess: Process?
+    private let processQueue = DispatchQueue(label: "SwitchMac.BluetoothManager.processQueue")
+
+    /// Whether a helper/blueutil process is currently running.
+    var isBusy: Bool { processQueue.sync { currentProcess != nil } }
+
     var keyboardAddress: String? {
         get { UserDefaults.standard.string(forKey: defaultsKey) }
         set { UserDefaults.standard.set(newValue, forKey: defaultsKey) }
+    }
+
+    /// Cancel any running blueutil/helper operation (safe to call from main thread).
+    func cancelCurrentOperation() {
+        processQueue.sync {
+            if let p = currentProcess {
+                p.terminate()
+                currentProcess = nil
+            }
+        }
     }
 
     // MARK: Device discovery
@@ -117,18 +134,25 @@ class BluetoothManager {
             proc.executableURL = URL(fileURLWithPath: helper)
             proc.arguments = args
             let sem = DispatchSemaphore(value: 0)
-            proc.terminationHandler = { _ in sem.signal() }
+            proc.terminationHandler = { p in
+                // clear currentProcess and signal semaphore
+                self.processQueue.sync { if self.currentProcess === p { self.currentProcess = nil } }
+                sem.signal()
+            }
             do {
                 try proc.run()
             } catch {
                 log("Failed to run helper: \(error)")
                 return -1
             }
+            // record running process so callers can cancel it
+            processQueue.sync { currentProcess = proc }
             let waitResult = sem.wait(timeout: .now() + blueutilTimeout)
             if waitResult == .timedOut {
                 log("helper \(args.joined(separator: " ")) timed out after \(blueutilTimeout)s — terminating")
                 proc.terminate()
                 _ = sem.wait(timeout: .now() + 2.0)
+                processQueue.sync { if self.currentProcess === proc { self.currentProcess = nil } }
                 return -2
             }
             let status = proc.terminationStatus
@@ -147,19 +171,24 @@ class BluetoothManager {
         proc.executableURL = URL(fileURLWithPath: path)
         proc.arguments = args
         let sem = DispatchSemaphore(value: 0)
-        proc.terminationHandler = { _ in sem.signal() }
+        proc.terminationHandler = { p in
+            self.processQueue.sync { if self.currentProcess === p { self.currentProcess = nil } }
+            sem.signal()
+        }
         do {
             try proc.run()
         } catch {
             log("Failed to run blueutil: \(error)")
             return -1
         }
+        processQueue.sync { currentProcess = proc }
         let waitResult = sem.wait(timeout: .now() + blueutilTimeout)
         if waitResult == .timedOut {
             log("blueutil \(args.joined(separator: " ")) timed out after \(blueutilTimeout)s — terminating")
             proc.terminate()
             // Give it a short moment to exit cleanly
             _ = sem.wait(timeout: .now() + 2.0)
+            processQueue.sync { if self.currentProcess === proc { self.currentProcess = nil } }
             return -2
         }
         log("blueutil \(args.joined(separator: " ")) → \(proc.terminationStatus)")
