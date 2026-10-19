@@ -13,6 +13,10 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("Carbon"),
             ]
+        ),
+        .executableTarget(
+            name: "SwitchMacBTHelper",
+            path: "Sources/SwitchMacBTHelper"
         )
     ]
 )
